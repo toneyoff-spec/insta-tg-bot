@@ -53,32 +53,18 @@ async def get_video_url(instagram_url: str) -> str | None:
         data = resp.json()
         logger.info("API response: %s", data)
 
-    # L'API retourne une liste de médias directement ou imbriquée
-    # Ex: [{"url": "...", "isVideo": True, ...}]
-    items = None
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        for key in ("result", "data", "media", "items", "medias"):
-            val = data.get(key)
-            if isinstance(val, list):
-                items = val
-                break
-        if items is None:
-            # Réponse plate avec url directe
-            if data.get("isVideo") or data.get("video_url") or data.get("url"):
-                return data.get("video_url") or data.get("url")
-
-    if items:
-        for item in items:
-            if isinstance(item, dict) and (item.get("isVideo") or "video" in str(item.get("type", "")).lower()):
-                v = item.get("url") or item.get("video_url")
-                if v:
-                    return v
-        # Si aucun marqué vidéo, retourner le premier url trouvé
+    # Structure réelle: {'data': [{'media': 'url_video', 'thumb': '...', 'isVideo': True}]}
+    items = data.get("data") or []
+    if isinstance(items, list):
         for item in items:
             if isinstance(item, dict):
-                v = item.get("url") or item.get("video_url")
+                v = item.get("media") or item.get("video_url") or item.get("url")
+                if v and item.get("isVideo"):
+                    return v
+        # Fallback : premier media trouvé
+        for item in items:
+            if isinstance(item, dict):
+                v = item.get("media") or item.get("url")
                 if v:
                     return v
     return None

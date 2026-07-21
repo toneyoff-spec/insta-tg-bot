@@ -56,7 +56,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         output_template = os.path.join(tmp_dir, f"{uuid.uuid4()}.%(ext)s")
         ydl_opts = {
             "outtmpl": output_template,
-            "format": "best[ext=mp4]/best",
+            "format": (
+                "best[height>width][ext=mp4]"
+                "/bestvideo[height>width]+bestaudio"
+                "/best[ext=mp4]/best"
+            ),
+            "merge_output_format": "mp4",
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,

@@ -53,24 +53,34 @@ async def get_video_url(instagram_url: str) -> str | None:
         data = resp.json()
         logger.info("API response: %s", data)
 
-    # L'API retourne une structure avec les médias — on cherche la première vidéo
-    # Structure possible : {"result": {"media": [{"video_url": "..."}]}} ou similaire
-    result = data.get("result") or data.get("data") or data
-    if isinstance(result, dict):
-        # Cas reel/post simple
-        video_url = (
-            result.get("video_url")
-            or result.get("url")
-            or result.get("download_url")
-        )
-        if video_url:
-            return video_url
-        # Cas carousel
-        media_list = result.get("media") or result.get("items") or []
-        for item in media_list:
-            v = item.get("video_url") or item.get("url")
-            if v:
-                return v
+    # L'API retourne une liste de médias directement ou imbriquée
+    # Ex: [{"url": "...", "isVideo": True, ...}]
+    items = None
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        for key in ("result", "data", "media", "items", "medias"):
+            val = data.get(key)
+            if isinstance(val, list):
+                items = val
+                break
+        if items is None:
+            # Réponse plate avec url directe
+            if data.get("isVideo") or data.get("video_url") or data.get("url"):
+                return data.get("video_url") or data.get("url")
+
+    if items:
+        for item in items:
+            if isinstance(item, dict) and (item.get("isVideo") or "video" in str(item.get("type", "")).lower()):
+                v = item.get("url") or item.get("video_url")
+                if v:
+                    return v
+        # Si aucun marqué vidéo, retourner le premier url trouvé
+        for item in items:
+            if isinstance(item, dict):
+                v = item.get("url") or item.get("video_url")
+                if v:
+                    return v
     return None
 
 

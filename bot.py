@@ -2,9 +2,8 @@ import logging
 import os
 import re
 import tempfile
-import uuid
+import httpx
 
-import yt_dlp
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -12,15 +11,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-# Récupère le token depuis une variable d'environnement (plus sûr que de le
-# mettre en dur dans le code). Voir le README pour comment la définir.
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN       = os.environ.get("TELEGRAM_BOT_TOKEN")
+RAPIDAPI_KEY    = os.environ.get("RAPIDAPI_KEY")
+RAPIDAPI_HOST   = "instagram-downloader-scraper-reels-igtv-posts-stories.p.rapidapi.com"
 
 INSTAGRAM_URL_RE = re.compile(
     r"(https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_\-]+/?[^\s]*)"
 )
 
-# Telegram limite l'envoi de fichiers via bot à 50 Mo
 MAX_TELEGRAM_SIZE = 50 * 1024 * 1024
 
 logging.basicConfig(
@@ -37,80 +35,101 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def get_video_url(instagram_url: str) -> str | None:
+    """Appelle l'API RapidAPI et retourne l'URL de téléchargement de la vidéo."""
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST,
+    }
+    params = {"url": instagram_url}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"https://{RAPIDAPI_HOST}/ig/post_info/",
+            headers=headers,
+            params=params,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("API response: %s", data)
+
+    # L'API retourne une structure avec les médias — on cherche la première vidéo
+    # Structure possible : {"result": {"media": [{"video_url": "..."}]}} ou similaire
+    result = data.get("result") or data.get("data") or data
+    if isinstance(result, dict):
+        # Cas reel/post simple
+        video_url = (
+            result.get("video_url")
+            or result.get("url")
+            or result.get("download_url")
+        )
+        if video_url:
+            return video_url
+        # Cas carousel
+        media_list = result.get("media") or result.get("items") or []
+        for item in media_list:
+            v = item.get("video_url") or item.get("url")
+            if v:
+                return v
+    return None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message_text = update.message.text or ""
     match = INSTAGRAM_URL_RE.search(message_text)
 
     if not match:
         await update.message.reply_text(
-            "Je ne vois pas de lien Instagram valide dans ton message. "
+            "Je ne vois pas de lien Instagram valide. "
             "Envoie un lien du type https://www.instagram.com/reel/..."
         )
         return
 
     url = match.group(1)
-    status_msg = await update.message.reply_text("Téléchargement en cours...")
+    status_msg = await update.message.reply_text("⏳ Récupération du lien...")
     await update.message.chat.send_action(ChatAction.UPLOAD_VIDEO)
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        output_template = os.path.join(tmp_dir, f"{uuid.uuid4()}.%(ext)s")
-        ydl_opts = {
-            "outtmpl": output_template,
-            "format": (
-                "best[height>width][ext=mp4]"
-                "/bestvideo[height>width]+bestaudio"
-                "/best[ext=mp4]/best"
-            ),
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-        }
+    try:
+        video_url = await get_video_url(url)
+    except Exception as exc:
+        logger.exception("Erreur API pour %s", url)
+        await status_msg.edit_text("❌ Erreur lors de la récupération de la vidéo. Réessaie.")
+        return
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-        except Exception as exc:
-            logger.exception("Échec du téléchargement pour %s", url)
-            await status_msg.edit_text(
-                "Impossible de télécharger cette vidéo. "
-                "Vérifie que le lien est correct et que le contenu est public."
-            )
-            return
+    if not video_url:
+        await status_msg.edit_text(
+            "❌ Impossible de trouver la vidéo. Vérifie que le lien est public."
+        )
+        return
 
-        if not os.path.exists(filename):
-            await status_msg.edit_text("Le fichier téléchargé est introuvable, réessaie.")
-            return
+    await status_msg.edit_text("⬇️ Téléchargement en cours...")
 
-        size = os.path.getsize(filename)
-        if size > MAX_TELEGRAM_SIZE:
-            await status_msg.edit_text(
-                "La vidéo dépasse 50 Mo, Telegram ne me permet pas de l'envoyer via le bot."
-            )
-            return
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            resp = await client.get(video_url)
+            resp.raise_for_status()
+            video_bytes = resp.content
+    except Exception as exc:
+        logger.exception("Erreur téléchargement vidéo %s", video_url)
+        await status_msg.edit_text("❌ Impossible de télécharger la vidéo.")
+        return
 
-        await status_msg.edit_text("Envoi de la vidéo...")
-        with open(filename, "rb") as video_file:
-            await update.message.reply_video(
-                video=video_file,
-                supports_streaming=True,
-                width=info.get("width"),
-                height=info.get("height"),
-                duration=int(info.get("duration") or 0) or None,
-            )
+    if len(video_bytes) > MAX_TELEGRAM_SIZE:
+        await status_msg.edit_text("❌ La vidéo dépasse 50 Mo, Telegram ne me permet pas de l'envoyer.")
+        return
 
-        await status_msg.delete()
+    await status_msg.edit_text("📤 Envoi...")
+    await update.message.reply_video(video=video_bytes, supports_streaming=True)
+    await status_msg.delete()
 
 
 def main() -> None:
     if not BOT_TOKEN:
-        raise RuntimeError(
-            "La variable d'environnement TELEGRAM_BOT_TOKEN n'est pas définie."
-        )
+        raise RuntimeError("Variable TELEGRAM_BOT_TOKEN non définie.")
+    if not RAPIDAPI_KEY:
+        raise RuntimeError("Variable RAPIDAPI_KEY non définie.")
 
     application = Application.builder().token(BOT_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

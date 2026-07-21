@@ -88,7 +88,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await status_msg.edit_text("Envoi de la vidéo...")
         with open(filename, "rb") as video_file:
-            await update.message.reply_video(video=video_file, supports_streaming=True)
+            await update.message.reply_video(
+                video=video_file,
+                supports_streaming=True,
+                width=info.get("width"),
+                height=info.get("height"),
+                duration=int(info.get("duration") or 0) or None,
+            )
 
         await status_msg.delete()
 

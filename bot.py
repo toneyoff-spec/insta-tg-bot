@@ -45,7 +45,7 @@ async def get_video_url(instagram_url: str) -> str | None:
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
-            f"https://{RAPIDAPI_HOST}/ig/post_info/",
+            f"https://{RAPIDAPI_HOST}/scraper",
             headers=headers,
             params=params,
         )
